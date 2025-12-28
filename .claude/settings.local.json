@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -m streamlit:*)",
+      "Bash(pip3 install:*)",
+      "Bash(where:*)",
+      "Bash(C:UsersADMINAppDataLocalMicrosoftWindowsAppsPythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0python.exe -m streamlit run app_enhanced.py --server.headless=true)",
+      "Bash(python3.12 -m streamlit:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

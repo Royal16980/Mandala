@@ -789,7 +789,21 @@ def main():
         if beginner_mode:
             st.info("ℹ️ **BEGINNER TIP**: Multi-layer creates separate cutting files that you stack for 3D depth. Start with 4-5 layers, not 20!")
 
-        st.header("Multi-Layer Topographic — Up to 20 Layers!")
+        st.header("Multi-Layer Topographic — 10 Mandala Styles!")
+
+        # Style guide for beginners
+        if beginner_mode:
+            with st.expander("📖 Quick Style Guide - Which Style Should I Choose?"):
+                st.markdown("""
+                **For Traditional Circular Mandalas:** 🎯 Classic Topographic or 🌸 Radial Bloom
+                **For Geometric/Yantra Patterns:** 🔷 Sacred Geometry or 💎 Crystal Facets
+                **For Nature/Floral Designs:** 🌊 Organic Flow or 🌸 Radial Bloom
+                **For Star/Sun Patterns:** ⭐ Starburst or 🌀 Spiral Energy
+                **For Complex Detailed Images:** 🎨 Detail Preserve or 🔲 Grid Harmony
+                **For Balanced Light/Dark:** ☯️ Yin-Yang Balance
+
+                **Not sure?** Start with 🎯 **Classic Topographic** - it works well for most images!
+                """)
 
         # Material calculator
         material_thickness = show_material_calculator()
@@ -817,11 +831,28 @@ def main():
                 help="Higher = organic shapes, Lower = sharp edges"
             )
 
-        layer_method = st.selectbox(
-            "Layer Method",
-            ["Brightness Bands (Recommended)", "Cumulative Threshold (Traditional Topo)"],
-            help="Brightness Bands = feature-following layers at different brightness levels, Cumulative = nested layers from outer to inner"
+        # 10 MANDALA-INSPIRED STYLES
+        style_options = {
+            "🎯 Classic Topographic": "Traditional concentric layers from outer to inner, like elevation contours",
+            "🌸 Radial Bloom": "Petal-like layers radiating from center, preserving circular mandala patterns",
+            "🔷 Sacred Geometry": "Sharp geometric layers based on yantra principles with clean edges",
+            "🌊 Organic Flow": "Smooth flowing layers following natural image gradients",
+            "⭐ Starburst": "Angular layers emphasizing radial symmetry and star patterns",
+            "🎨 Detail Preserve": "Maximum detail retention with fine contour following",
+            "🔲 Grid Harmony": "Balanced layers using structured threshold spacing",
+            "🌀 Spiral Energy": "Layers following spiral and vortex patterns from center",
+            "💎 Crystal Facets": "Sharp angular cuts creating faceted gem-like layers",
+            "☯️ Yin-Yang Balance": "Alternating emphasis on light/dark features for balance"
+        }
+
+        selected_style = st.selectbox(
+            "🎭 Multi-Layer Style",
+            list(style_options.keys()),
+            help="Choose a generation style optimized for different mandala types"
         )
+
+        with st.expander("ℹ️ About This Style"):
+            st.info(f"**{selected_style}**\n\n{style_options[selected_style]}")
 
         invert_layers = st.checkbox("Invert Stacking Order", value=False)
 
@@ -836,91 +867,153 @@ def main():
                 previews = []
                 layer_info = []
 
-                if "Brightness" in layer_method:
-                    # NEW CONTOUR-BASED APPROACH: Extract features at different intensity levels
-                    # This preserves the actual image structure instead of arbitrary brightness bands
-                    thresholds = np.linspace(255, 0, num_layers + 1)[:-1]  # From bright to dark
+                # STYLE-SPECIFIC PROCESSING
+                # Each style uses different algorithms optimized for specific mandala types
 
-                    for i in range(num_layers):
+                for i in range(num_layers):
+                    # Calculate threshold based on style
+                    if "Classic Topographic" in selected_style:
+                        # Traditional nested layers from bright to dark
+                        thresholds = np.linspace(255, 0, num_layers + 1)
+                        threshold_val = int(thresholds[i + 1])
+
+                    elif "Radial Bloom" in selected_style:
+                        # Non-linear threshold for petal emphasis
+                        progress = i / max(1, num_layers - 1)
+                        threshold_val = int(255 * (1 - progress ** 0.7))  # Power curve for radial emphasis
+
+                    elif "Sacred Geometry" in selected_style:
+                        # Evenly spaced for geometric precision
+                        thresholds = np.linspace(255, 0, num_layers + 1)
                         threshold_val = int(thresholds[i])
 
-                        # Create binary mask at this threshold level
-                        _, mask = cv2.threshold(blurred, threshold_val, 255, cv2.THRESH_BINARY)
+                    elif "Organic Flow" in selected_style:
+                        # Sigmoid-based for smooth gradients
+                        progress = i / max(1, num_layers - 1)
+                        threshold_val = int(255 * (1 - 1/(1 + np.exp(-10*(progress-0.5)))))
 
-                        # Use morphological operations to clean up and extract meaningful shapes
+                    elif "Starburst" in selected_style:
+                        # Emphasize extremes for angular features
+                        progress = i / max(1, num_layers - 1)
+                        threshold_val = int(255 * (1 - progress ** 2))  # Quadratic for star points
+
+                    elif "Detail Preserve" in selected_style:
+                        # Fine gradation for maximum detail
+                        threshold_val = int(255 - (i * 255 / num_layers))
+
+                    elif "Grid Harmony" in selected_style:
+                        # Balanced linear spacing
+                        threshold_val = int(255 * (1 - i / num_layers))
+
+                    elif "Spiral Energy" in selected_style:
+                        # Logarithmic for spiral emphasis
+                        progress = (i + 1) / num_layers
+                        threshold_val = int(255 * (1 - np.log1p(progress * 2) / np.log1p(2)))
+
+                    elif "Crystal Facets" in selected_style:
+                        # Sharp transitions for faceted look
+                        threshold_val = int(255 * (num_layers - i - 1) / num_layers)
+
+                    else:  # Yin-Yang Balance
+                        # Alternating emphasis
+                        if i % 2 == 0:
+                            threshold_val = int(255 * (1 - i / num_layers))
+                        else:
+                            threshold_val = int(255 * (1 - (i + 0.5) / num_layers))
+
+                    # Create mask at threshold
+                    _, mask = cv2.threshold(blurred, threshold_val, 255, cv2.THRESH_BINARY)
+
+                    # Style-specific morphological operations
+                    if "Sacred Geometry" in selected_style or "Crystal Facets" in selected_style:
+                        # Minimal smoothing for sharp edges
+                        kernel = np.ones((3, 3), np.uint8)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+                    elif "Organic Flow" in selected_style or "Radial Bloom" in selected_style:
+                        # Heavy smoothing for organic shapes
+                        kernel = np.ones((7, 7), np.uint8)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+                    elif "Detail Preserve" in selected_style:
+                        # Minimal processing to preserve fine details
+                        kernel = np.ones((3, 3), np.uint8)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+                    else:  # Default balanced processing
                         kernel_size = 3 if num_layers > 10 else 5
                         kernel = np.ones((kernel_size, kernel_size), np.uint8)
-
-                        # Close small gaps
                         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                        # Remove small noise
                         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
-                        # Use edge detection to find actual feature boundaries
+                    # Edge detection with style-specific parameters
+                    if "Sacred Geometry" in selected_style or "Crystal Facets" in selected_style:
+                        # High thresholds for clean geometric edges
+                        edges = cv2.Canny(mask, 100, 200)
+                    elif "Detail Preserve" in selected_style:
+                        # Low thresholds for fine details
+                        edges = cv2.Canny(mask, 30, 100)
+                    else:
+                        # Balanced edge detection
                         edges = cv2.Canny(mask, 50, 150)
 
-                        # Find contours from edges
+                    # Find contours
+                    if "Radial Bloom" in selected_style or "Starburst" in selected_style:
+                        # RETR_TREE for hierarchical radial patterns
                         contours_raw, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
-
-                        # Filter and simplify contours to follow actual image features
-                        contour_list = []
-                        min_contour_area = 50.0 if num_layers > 10 else 20.0
-
-                        for c in contours_raw:
-                            area = cv2.contourArea(c)
-                            if area < min_contour_area:
-                                continue
-
-                            # Simplify contour while preserving feature shape
-                            peri = cv2.arcLength(c, True)
-                            # Less aggressive simplification to preserve details
-                            eps = max(0.5, peri * 0.002)
-                            approx = cv2.approxPolyDP(c, eps, True)
-                            contour_list.append(approx)
-
-                        svg_bytes = svg_bytes_from_contours(contour_list, w, h, output_dpi, output_units, add_alignment_marks)
-
-                        layer_name = f"layer_{i+1:02d}_threshold_{threshold_val}.svg"
-                        svgs.append((layer_name, svg_bytes))
-                        previews.append(make_layer_preview(contour_list, w, h))
-                        layer_info.append({'layer': i + 1, 'threshold': threshold_val, 'contours': len(contour_list)})
-
-                else:  # Cumulative - Nested layers from outer to inner
-                    thresholds = np.linspace(255, 0, num_layers + 1)
-                    for i in range(num_layers):
-                        threshold_val = int(thresholds[i + 1])
-                        _, mask = cv2.threshold(blurred, threshold_val, 255, cv2.THRESH_BINARY)
-
-                        # Morphological operations to preserve feature shapes
-                        kernel = np.ones((5, 5), np.uint8)
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-
-                        # Use edge detection for better feature following
-                        edges = cv2.Canny(mask, 50, 150)
-
-                        # Find contours from edges
+                    else:
+                        # RETR_EXTERNAL for cleaner layers
                         contours_raw, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                        contour_list = []
-                        min_contour_area = 50.0 if num_layers > 10 else 20.0
 
-                        for c in contours_raw:
-                            area = cv2.contourArea(c)
-                            if area < min_contour_area:
-                                continue
+                    # Filter and simplify contours
+                    contour_list = []
 
-                            # Preserve detail with careful simplification
-                            peri = cv2.arcLength(c, True)
+                    # Style-specific minimum area
+                    if "Detail Preserve" in selected_style:
+                        min_contour_area = 10.0  # Keep tiny details
+                    elif num_layers > 10:
+                        min_contour_area = 50.0
+                    else:
+                        min_contour_area = 20.0
+
+                    for c in contours_raw:
+                        area = cv2.contourArea(c)
+                        if area < min_contour_area:
+                            continue
+
+                        peri = cv2.arcLength(c, True)
+
+                        # Style-specific simplification
+                        if "Sacred Geometry" in selected_style or "Crystal Facets" in selected_style:
+                            # Aggressive simplification for angular geometry
+                            eps = max(1.0, peri * 0.005)
+                        elif "Detail Preserve" in selected_style:
+                            # Minimal simplification
+                            eps = max(0.3, peri * 0.001)
+                        elif "Organic Flow" in selected_style:
+                            # Moderate for smooth curves
+                            eps = max(0.7, peri * 0.003)
+                        else:
+                            # Balanced default
                             eps = max(0.5, peri * 0.002)
-                            approx = cv2.approxPolyDP(c, eps, True)
-                            contour_list.append(approx)
 
-                        svg_bytes = svg_bytes_from_contours(contour_list, w, h, output_dpi, output_units, add_alignment_marks)
+                        approx = cv2.approxPolyDP(c, eps, True)
+                        contour_list.append(approx)
 
-                        layer_name = f"layer_{i+1:02d}_threshold_{threshold_val}.svg"
-                        svgs.append((layer_name, svg_bytes))
-                        previews.append(make_layer_preview(contour_list, w, h))
-                        layer_info.append({'layer': i + 1, 'threshold': threshold_val, 'contours': len(contour_list)})
+                    # Generate SVG
+                    svg_bytes = svg_bytes_from_contours(contour_list, w, h, output_dpi, output_units, add_alignment_marks)
+
+                    style_name = selected_style.split()[1] if len(selected_style.split()) > 1 else "layer"
+                    layer_name = f"layer_{i+1:02d}_{style_name}_t{threshold_val}.svg"
+                    svgs.append((layer_name, svg_bytes))
+                    previews.append(make_layer_preview(contour_list, w, h))
+                    layer_info.append({
+                        'layer': i + 1,
+                        'threshold': threshold_val,
+                        'contours': len(contour_list),
+                        'style': selected_style
+                    })
 
             st.success(f"✅ {num_layers} layers generated!")
 

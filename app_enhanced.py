@@ -820,7 +820,7 @@ def main():
         layer_method = st.selectbox(
             "Layer Method",
             ["Brightness Bands (Recommended)", "Cumulative Threshold (Traditional Topo)"],
-            help="Brightness Bands = separate ranges, Cumulative = nested layers"
+            help="Brightness Bands = feature-following layers at different brightness levels, Cumulative = nested layers from outer to inner"
         )
 
         invert_layers = st.checkbox("Invert Stacking Order", value=False)
@@ -837,39 +837,81 @@ def main():
                 layer_info = []
 
                 if "Brightness" in layer_method:
-                    thresholds = np.linspace(0, 255, num_layers + 1)
-                    for i in range(num_layers):
-                        lo, hi = int(thresholds[i]), int(thresholds[i + 1])
-                        mask = cv2.inRange(blurred, lo, hi)
-                        kernel = np.ones((3, 3), np.uint8)
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                    # NEW CONTOUR-BASED APPROACH: Extract features at different intensity levels
+                    # This preserves the actual image structure instead of arbitrary brightness bands
+                    thresholds = np.linspace(255, 0, num_layers + 1)[:-1]  # From bright to dark
 
-                        contour_list = find_and_simplify_contours(mask, 0.003, 20.0)
+                    for i in range(num_layers):
+                        threshold_val = int(thresholds[i])
+
+                        # Create binary mask at this threshold level
+                        _, mask = cv2.threshold(blurred, threshold_val, 255, cv2.THRESH_BINARY)
+
+                        # Use morphological operations to clean up and extract meaningful shapes
+                        kernel_size = 3 if num_layers > 10 else 5
+                        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+
+                        # Close small gaps
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                        # Remove small noise
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+                        # Use edge detection to find actual feature boundaries
+                        edges = cv2.Canny(mask, 50, 150)
+
+                        # Find contours from edges
+                        contours_raw, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+
+                        # Filter and simplify contours to follow actual image features
+                        contour_list = []
+                        min_contour_area = 50.0 if num_layers > 10 else 20.0
+
+                        for c in contours_raw:
+                            area = cv2.contourArea(c)
+                            if area < min_contour_area:
+                                continue
+
+                            # Simplify contour while preserving feature shape
+                            peri = cv2.arcLength(c, True)
+                            # Less aggressive simplification to preserve details
+                            eps = max(0.5, peri * 0.002)
+                            approx = cv2.approxPolyDP(c, eps, True)
+                            contour_list.append(approx)
+
                         svg_bytes = svg_bytes_from_contours(contour_list, w, h, output_dpi, output_units, add_alignment_marks)
 
-                        layer_name = f"layer_{i+1:02d}_band_{lo}-{hi}.svg"
+                        layer_name = f"layer_{i+1:02d}_threshold_{threshold_val}.svg"
                         svgs.append((layer_name, svg_bytes))
                         previews.append(make_layer_preview(contour_list, w, h))
-                        layer_info.append({'layer': i + 1, 'range': f"{lo}-{hi}", 'contours': len(contour_list)})
+                        layer_info.append({'layer': i + 1, 'threshold': threshold_val, 'contours': len(contour_list)})
 
-                else:  # Cumulative
+                else:  # Cumulative - Nested layers from outer to inner
                     thresholds = np.linspace(255, 0, num_layers + 1)
                     for i in range(num_layers):
                         threshold_val = int(thresholds[i + 1])
                         _, mask = cv2.threshold(blurred, threshold_val, 255, cv2.THRESH_BINARY)
 
+                        # Morphological operations to preserve feature shapes
                         kernel = np.ones((5, 5), np.uint8)
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
-                        contours_raw, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                        # Use edge detection for better feature following
+                        edges = cv2.Canny(mask, 50, 150)
+
+                        # Find contours from edges
+                        contours_raw, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
                         contour_list = []
+                        min_contour_area = 50.0 if num_layers > 10 else 20.0
+
                         for c in contours_raw:
-                            if cv2.contourArea(c) < 20.0:
+                            area = cv2.contourArea(c)
+                            if area < min_contour_area:
                                 continue
+
+                            # Preserve detail with careful simplification
                             peri = cv2.arcLength(c, True)
-                            eps = max(1.0, peri * 0.003)
+                            eps = max(0.5, peri * 0.002)
                             approx = cv2.approxPolyDP(c, eps, True)
                             contour_list.append(approx)
 

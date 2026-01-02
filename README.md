@@ -68,6 +68,59 @@ A powerful Python-based web application that converts images into laser-engravin
 - Otsu, N. (1979). "A threshold selection method from gray-level histograms"
 - Zuiderveld, K. (1994). "Contrast limited adaptive histogram equalization"
 
+### 6. 🤖 **NEW: AI Depth Map (3D Relief Generation)**
+**Transform any 2D photo into 3D!** Uses Intel's MiDaS AI to extract depth from a single image:
+- ✅ **AI-powered depth estimation** using state-of-the-art MiDaS model (Intel/Ranftl et al., 2020)
+- ✅ **Understands 3D structure** from single 2D photos - recognizes foreground, background, depth
+- ✅ **Creates depth maps** - grayscale representation where brightness = depth
+- ✅ **Optimized for laser engraving**:
+  - Depth contrast adjustment for pronounced relief
+  - Smoothing for flowing 3D surfaces
+  - Inversion for emboss vs deboss effects
+- ✅ **Multi-layer heightmaps** - converts depth to stackable SVG layers for physical 3D sculptures
+- ✅ **3 model options**:
+  - **dpt-large**: Highest quality (RECOMMENDED)
+  - **dpt-hybrid-midas**: Balanced performance
+  - **dpt-beit-large-512**: Faster processing
+- 🤖 **Zero-shot learning** - works on any image without training
+- 🚀 **GPU acceleration** - automatic GPU detection and usage
+- 📊 **Processing stats** - model info, device, depth range
+
+**Perfect for:**
+- Portrait relief engravings with natural depth
+- Landscape 3D topography
+- Architectural depth visualization
+- Product photography with dimension
+- Lithophanes (backlit depth images)
+- Physical 3D sculptures (stacked layers)
+
+**Creative Applications:**
+1. **Variable-depth engraving**: Use depth map to control laser power for 3D relief on flat material
+2. **Multi-pass 3D**: Multiple laser passes with varying power based on depth
+3. **Stacked sculptures**: Cut heightmap layers and stack for physical 3D objects
+4. **Lithophanes**: Backlit thin material with depth-based thickness variation
+
+**Technical Details:**
+- **Model**: MiDaS (Mixed Data Dense Prediction and Scaling)
+- **Architecture**: Dense Prediction Transformer (DPT)
+- **Training**: Multi-dataset zero-shot learning
+- **Output**: Normalized grayscale depth map (0-255)
+- **First use**: ~1.2GB model download (cached locally)
+- **Processing**: 10-30 seconds (CPU), 3-10 seconds (GPU)
+
+**Research Foundation:**
+- Ranftl, R., Lasinger, K., Hafner, D., Schindler, K., & Koltun, V. (2020). "Towards Robust Monocular Depth Estimation: Mixing Datasets for Zero-shot Cross-dataset Transfer." IEEE TPAMI.
+
+**Requirements:**
+```bash
+# Optional dependencies (for AI Depth Map feature only)
+pip install torch transformers
+
+# CPU-only version (smaller download):
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install transformers
+```
+
 ## Tech Stack
 
 - **Language:** Python 3.9+

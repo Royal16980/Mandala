@@ -12,6 +12,16 @@ import streamlit as st
 import svgwrite
 from PIL import Image, ImageDraw, ImageFont
 
+# Optional AI dependencies for depth estimation
+try:
+    import torch
+    from transformers import pipeline
+    DEPTH_AVAILABLE = True
+except ImportError:
+    DEPTH_AVAILABLE = False
+    torch = None
+    pipeline = None
+
 
 # ============================================================================
 # CONFIGURATION
@@ -587,6 +597,196 @@ def laser_prep_process(image: Image.Image,
 
 
 # ============================================================================
+# AI DEPTH MAP GENERATION
+# ============================================================================
+
+@st.cache_resource
+def load_depth_model(model_name: str = "Intel/dpt-large"):
+    """
+    Load pre-trained depth estimation model (cached for performance).
+
+    Uses MiDaS (Mixed Data Dense Prediction and Scaling) - Intel's state-of-the-art
+    monocular depth estimation model.
+
+    Reference: Ranftl, R., Lasinger, K., Hafner, D., Schindler, K., & Koltun, V. (2020).
+    "Towards Robust Monocular Depth Estimation: Mixing Datasets for Zero-shot
+    Cross-dataset Transfer"
+    IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI).
+
+    Args:
+        model_name: Hugging Face model identifier
+
+    Returns:
+        depth_estimator: Loaded pipeline for depth estimation
+    """
+    if not DEPTH_AVAILABLE:
+        return None
+
+    try:
+        # Load the depth estimation pipeline
+        depth_estimator = pipeline(
+            "depth-estimation",
+            model=model_name,
+            device=0 if torch.cuda.is_available() else -1  # Use GPU if available
+        )
+        return depth_estimator
+    except Exception as e:
+        st.error(f"Failed to load depth model: {e}")
+        return None
+
+
+def generate_depth_map(image: Image.Image,
+                       model_name: str = "Intel/dpt-large",
+                       normalize: bool = True) -> Tuple[np.ndarray, dict]:
+    """
+    Generate depth map from RGB image using AI depth estimation.
+
+    Uses MiDaS deep learning model to predict per-pixel depth from a single image.
+    The depth map represents relative depth - darker = farther, lighter = closer.
+
+    Perfect for creating 3D relief effects in laser engraving by treating depth
+    as engraving intensity or layer height.
+
+    Reference: Ranftl et al. (2020) - "Towards Robust Monocular Depth Estimation"
+
+    Args:
+        image: Input PIL RGB image
+        model_name: Model to use ('Intel/dpt-large', 'Intel/dpt-hybrid-midas', etc.)
+        normalize: Normalize depth map to 0-255 range
+
+    Returns:
+        depth_map: Grayscale depth map (uint8)
+        metadata: Processing information
+    """
+    if not DEPTH_AVAILABLE:
+        raise ImportError("Depth estimation requires 'torch' and 'transformers'. "
+                         "Install with: pip install torch transformers")
+
+    metadata = {
+        'model': model_name,
+        'input_size': image.size,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    }
+
+    # Load model (cached)
+    depth_estimator = load_depth_model(model_name)
+
+    if depth_estimator is None:
+        raise RuntimeError("Failed to load depth estimation model")
+
+    # Generate depth map
+    with st.spinner("🤖 AI is analyzing depth (this may take 10-30 seconds)..."):
+        result = depth_estimator(image)
+        depth_pil = result["depth"]
+
+    # Convert to numpy array
+    depth_array = np.array(depth_pil)
+
+    # Normalize to 0-255 range if requested
+    if normalize:
+        depth_min = depth_array.min()
+        depth_max = depth_array.max()
+        depth_normalized = ((depth_array - depth_min) / (depth_max - depth_min) * 255).astype(np.uint8)
+        metadata['depth_range'] = (float(depth_min), float(depth_max))
+        metadata['normalized'] = True
+        return depth_normalized, metadata
+    else:
+        metadata['normalized'] = False
+        return depth_array.astype(np.uint8), metadata
+
+
+def optimize_depth_for_engraving(depth_map: np.ndarray,
+                                  contrast: float = 1.5,
+                                  smoothing: int = 5,
+                                  invert: bool = False) -> np.ndarray:
+    """
+    Optimize depth map for laser engraving.
+
+    Enhances depth maps to create better 3D relief effects:
+    - Increases contrast for more pronounced depth
+    - Smooths to reduce noise and create flowing surfaces
+    - Optional inversion (useful for embossing vs debossing)
+
+    Args:
+        depth_map: Input depth map (grayscale)
+        contrast: Contrast multiplier (1.0 = no change, >1 = more contrast)
+        smoothing: Gaussian blur kernel size (0 = no smoothing)
+        invert: Invert depth (swap near/far)
+
+    Returns:
+        Optimized depth map
+    """
+    optimized = depth_map.copy().astype(np.float32)
+
+    # Apply contrast enhancement
+    if contrast != 1.0:
+        # CLAHE for local adaptive contrast
+        clahe = cv2.createCLAHE(clipLimit=contrast * 2.0, tileGridSize=(8, 8))
+        optimized = clahe.apply(optimized.astype(np.uint8)).astype(np.float32)
+
+    # Apply smoothing
+    if smoothing > 0:
+        kernel_size = smoothing if smoothing % 2 == 1 else smoothing + 1
+        optimized = cv2.GaussianBlur(optimized, (kernel_size, kernel_size), 0)
+
+    # Invert if requested
+    if invert:
+        optimized = 255 - optimized
+
+    return np.clip(optimized, 0, 255).astype(np.uint8)
+
+
+def depth_to_heightmap_layers(depth_map: np.ndarray,
+                               num_layers: int = 5,
+                               smoothing: int = 7) -> List[Tuple[np.ndarray, int]]:
+    """
+    Convert depth map to multi-layer heightmap for 3D laser engraving.
+
+    Creates stacking layers based on depth levels, perfect for creating
+    physical 3D relief sculptures with a laser cutter.
+
+    Each layer represents a depth band that should be cut from material
+    of specific thickness and stacked to create the 3D effect.
+
+    Args:
+        depth_map: Grayscale depth map
+        num_layers: Number of stacking layers to create (2-20)
+        smoothing: Blur amount for smooth transitions
+
+    Returns:
+        List of (binary_mask, threshold_value) tuples for each layer
+    """
+    # Smooth depth map for better layer transitions
+    if smoothing > 0:
+        kernel_size = smoothing if smoothing % 2 == 1 else smoothing + 1
+        smoothed = cv2.GaussianBlur(depth_map, (kernel_size, kernel_size), 0)
+    else:
+        smoothed = depth_map
+
+    layers = []
+
+    # Generate threshold values for each layer
+    thresholds = np.linspace(255, 0, num_layers + 1)
+
+    for i in range(num_layers):
+        # Create binary mask for this depth level
+        lower_threshold = int(thresholds[i + 1])
+        upper_threshold = int(thresholds[i])
+
+        # Pixels within this depth range
+        mask = cv2.inRange(smoothed, lower_threshold, upper_threshold)
+
+        # Morphological cleanup
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        layers.append((mask, lower_threshold))
+
+    return layers
+
+
+# ============================================================================
 # IMAGE PROCESSING
 # ============================================================================
 
@@ -813,7 +1013,7 @@ def show_beginner_guide():
 
         ---
 
-        #### 🎯 **Five Processing Modes:**
+        #### 🎯 **Six Processing Modes:**
 
         **1. Photo Engraving (Dithering)** 📸
         - **What it does**: Converts photos to black & white dots for engraving
@@ -839,11 +1039,17 @@ def show_beginner_guide():
         - **Output**: Clean SVG + PNG with smooth, continuous paths
         - **Beginner tip**: Perfect for professional results with zero manual cleanup!
 
-        **5. 🚀 Laser Prep (One-Click) - NEW!** 🚀
+        **5. 🚀 Laser Prep (One-Click)** 🚀
         - **What it does**: Complete automatic preparation - resize, background removal, contrast, sharpening
         - **Best for**: Raw photos needing full optimization before engraving
         - **Output**: Fully optimized PNG ready for any laser software
         - **Beginner tip**: Upload → Click → Download! Saves 1-2 hours of Photoshop work!
+
+        **6. 🤖 AI Depth Map (3D Relief) - NEW!** 🤖
+        - **What it does**: Uses AI to extract 3D depth from any 2D photo
+        - **Best for**: Creating 3D relief engravings, lithophanes, physical 3D sculptures
+        - **Output**: Depth map PNG + optional multi-layer heightmaps
+        - **Beginner tip**: AI magic! Transforms flat photos into 3D - perfect for portraits with depth!
 
         ---
 
@@ -1120,12 +1326,13 @@ def main():
     st.markdown("---")
     st.markdown("### **Step 2: Choose Your Processing Mode**")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📸 Photo Engraving",
         "✏️ Vector Scoring",
         "🏔️ Multi-Layer (20 Layers Max)",
         "⚡ Engraving Mode (Laser-Ready)",
-        "🚀 Laser Prep (One-Click)"
+        "🚀 Laser Prep (One-Click)",
+        "🤖 AI Depth Map (3D Relief)"
     ])
 
     # TAB 1: PHOTO ENGRAVING
@@ -2075,15 +2282,391 @@ def main():
                 Just import the downloaded file to your laser software and you're ready to engrave! 🚀
                 """)
 
+    # TAB 6: AI DEPTH MAP (3D RELIEF)
+    with tab6:
+        if not DEPTH_AVAILABLE:
+            st.error("""
+            ⚠️ **AI Depth Map feature requires additional dependencies!**
+
+            To use this feature, install:
+            ```bash
+            pip install torch transformers
+            ```
+
+            Or install the CPU-only version (smaller download):
+            ```bash
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+            pip install transformers
+            ```
+
+            After installation, restart the app.
+            """)
+            return
+
+        if beginner_mode:
+            st.info("🤖 **AI MAGIC**: This feature uses artificial intelligence to understand depth in your photos! Upload any 2D image and AI will create a 3D depth map perfect for relief engraving!")
+
+        st.header("🤖 AI Depth Map — 3D Relief Generation")
+
+        st.markdown("""
+        ### Transform any photo into 3D depth! 🎨
+
+        **AI-Powered Depth Estimation** uses Intel's MiDaS model to analyze your image and predict depth:
+        - ✅ **AI understands 3D structure** from a single 2D photo
+        - ✅ **Creates realistic depth maps** - near objects bright, far objects dark
+        - ✅ **Perfect for 3D relief engraving** - use depth as engraving intensity
+        - ✅ **Multi-layer heightmaps** - stack layers for physical 3D sculptures
+        - 🤖 **State-of-the-art AI** - MiDaS model by Intel (Ranftl et al., 2020)
+
+        **Perfect for:** Portraits, landscapes, architectural photos, product shots
+
+        ---
+        """)
+
+        # Model info banner
+        col_ai1, col_ai2, col_ai3 = st.columns(3)
+
+        with col_ai1:
+            st.markdown("""
+            <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 10px; color: white; text-align: center;'>
+                <h3 style='margin: 0; color: white;'>🧠 MiDaS AI</h3>
+                <p style='margin: 5px 0 0 0; color: white; font-size: 0.9em;'>Intel's SOTA Model</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_ai2:
+            device_text = "🚀 GPU" if torch.cuda.is_available() else "💻 CPU"
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); padding: 15px; border-radius: 10px; color: white; text-align: center;'>
+                <h3 style='margin: 0; color: white;'>{device_text}</h3>
+                <p style='margin: 5px 0 0 0; color: white; font-size: 0.9em;'>Processing Device</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_ai3:
+            st.markdown("""
+            <div style='background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); padding: 15px; border-radius: 10px; color: white; text-align: center;'>
+                <h3 style='margin: 0; color: white;'>🎯 Zero-Shot</h3>
+                <p style='margin: 5px 0 0 0; color: white; font-size: 0.9em;'>Works on Any Image</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # Settings
+        st.subheader("🎛️ Depth Generation Settings")
+
+        with st.expander("🤖 AI Model Selection", expanded=True):
+            model_choice = st.selectbox(
+                "Depth Model",
+                options=[
+                    "Intel/dpt-large (Highest Quality)",
+                    "Intel/dpt-hybrid-midas (Balanced)",
+                    "Intel/dpt-beit-large-512 (Fast)"
+                ],
+                index=0,
+                help="**dpt-large**: Best quality, slower (RECOMMENDED)\n"
+                     "**dpt-hybrid-midas**: Good balance\n"
+                     "**dpt-beit-large-512**: Faster processing"
+            )
+
+            model_map = {
+                "Intel/dpt-large (Highest Quality)": "Intel/dpt-large",
+                "Intel/dpt-hybrid-midas (Balanced)": "Intel/dpt-hybrid-midas",
+                "Intel/dpt-beit-large-512 (Fast)": "Intel/dpt-beit-large-512"
+            }
+            selected_model = model_map[model_choice]
+
+            st.info(f"""
+            **Selected Model:** `{selected_model}`
+
+            **First-time use:** Model will download (~1.2GB). This happens once and is cached.
+            **Processing time:** 10-30 seconds depending on image size and device.
+            """)
+
+        with st.expander("🎨 Depth Optimization", expanded=True):
+            col_opt1, col_opt2 = st.columns(2)
+
+            with col_opt1:
+                depth_contrast = st.slider(
+                    "Depth Contrast",
+                    min_value=0.5,
+                    max_value=3.0,
+                    value=1.5,
+                    step=0.1,
+                    help="Higher = more pronounced depth differences"
+                )
+
+                invert_depth = st.checkbox(
+                    "Invert Depth",
+                    value=False,
+                    help="Swap near/far (emboss vs deboss effect)"
+                )
+
+            with col_opt2:
+                depth_smoothing = st.slider(
+                    "Smoothing",
+                    min_value=0,
+                    max_value=21,
+                    value=5,
+                    step=2,
+                    help="Higher = smoother transitions, less noise"
+                )
+
+        with st.expander("🏔️ 3D Heightmap Layers (Optional)", expanded=False):
+            generate_layers = st.checkbox(
+                "Generate Multi-Layer Heightmap",
+                value=False,
+                help="Convert depth to stacking layers for physical 3D relief"
+            )
+
+            if generate_layers:
+                heightmap_layers = st.slider(
+                    "Number of Layers",
+                    min_value=3,
+                    max_value=15,
+                    value=5,
+                    help="How many layers to stack for 3D effect"
+                )
+
+                layer_smoothing = st.slider(
+                    "Layer Transition Smoothing",
+                    min_value=1,
+                    max_value=21,
+                    value=7,
+                    step=2
+                )
+
+        st.markdown("---")
+
+        # Generation button
+        if st.button("🤖 Generate AI Depth Map", type="primary", use_container_width=True):
+            try:
+                # Generate depth map
+                depth_map, depth_metadata = generate_depth_map(
+                    image=st.session_state.processed_image,
+                    model_name=selected_model,
+                    normalize=True
+                )
+
+                # Optimize for engraving
+                optimized_depth = optimize_depth_for_engraving(
+                    depth_map=depth_map,
+                    contrast=depth_contrast,
+                    smoothing=depth_smoothing,
+                    invert=invert_depth
+                )
+
+                st.success(f"✅ Depth map generated successfully using {selected_model}!")
+
+                # Display results
+                st.markdown("---")
+                st.subheader("📊 Depth Map Results")
+
+                result_col1, result_col2 = st.columns(2)
+
+                with result_col1:
+                    st.markdown("**Original Image**")
+                    st.image(image, use_container_width=True)
+
+                with result_col2:
+                    st.markdown("**AI-Generated Depth Map**")
+                    st.image(optimized_depth, use_container_width=True,
+                            caption="Light = Near, Dark = Far")
+
+                # Metadata
+                st.markdown("---")
+                st.subheader("🔬 AI Processing Details")
+
+                meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
+
+                with meta_col1:
+                    st.metric("AI Model", selected_model.split('/')[1])
+
+                with meta_col2:
+                    st.metric("Device", depth_metadata['device'].upper())
+
+                with meta_col3:
+                    st.metric("Resolution", f"{w}×{h}")
+
+                with meta_col4:
+                    depth_range = depth_metadata.get('depth_range', (0, 255))
+                    st.metric("Depth Range", f"{depth_range[0]:.0f}-{depth_range[1]:.0f}")
+
+                # Download depth map
+                st.markdown("---")
+                st.subheader("⬇️ Download Depth Map")
+
+                download_depth_col1, download_depth_col2 = st.columns(2)
+
+                # Save depth map as PNG
+                depth_pil = Image.fromarray(optimized_depth).convert('L')
+                buf_depth = io.BytesIO()
+                depth_pil.save(buf_depth, format="PNG", dpi=(target_dpi, target_dpi))
+                buf_depth.seek(0)
+
+                with download_depth_col1:
+                    st.download_button(
+                        label="📥 Download Depth Map PNG",
+                        data=buf_depth,
+                        file_name=f"depth_map_ai_{selected_model.split('/')[1]}.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+
+                    st.caption("✅ Grayscale depth map for 3D relief engraving")
+
+                with download_depth_col2:
+                    st.info("""
+                    **How to Use in Laser Software:**
+
+                    1. Import depth map PNG
+                    2. Set to "Image" or "3D Engrave" mode
+                    3. Use depth as power/intensity control
+                    4. Lighter areas = deeper engraving
+                    5. Darker areas = shallower/no engraving
+                    """)
+
+                # Generate heightmap layers if requested
+                if generate_layers:
+                    st.markdown("---")
+                    st.subheader("🏔️ 3D Heightmap Layers")
+
+                    with st.spinner(f"Generating {heightmap_layers} stacking layers..."):
+                        layers_data = depth_to_heightmap_layers(
+                            depth_map=optimized_depth,
+                            num_layers=heightmap_layers,
+                            smoothing=layer_smoothing
+                        )
+
+                    st.success(f"✅ {len(layers_data)} heightmap layers created!")
+
+                    # Display layer previews
+                    cols_per_row = min(5, heightmap_layers)
+                    rows_needed = (heightmap_layers + cols_per_row - 1) // cols_per_row
+
+                    for row in range(rows_needed):
+                        cols = st.columns(cols_per_row)
+                        for col_idx in range(cols_per_row):
+                            layer_idx = row * cols_per_row + col_idx
+                            if layer_idx < len(layers_data):
+                                with cols[col_idx]:
+                                    mask, threshold = layers_data[layer_idx]
+                                    # Create preview with contours
+                                    preview = np.ones((h, w, 3), dtype=np.uint8) * 255
+                                    contours_layer, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                    cv2.drawContours(preview, contours_layer, -1, (0, 0, 0), 1)
+
+                                    st.image(preview, caption=f"Layer {layer_idx + 1}",
+                                            use_container_width=True)
+
+                    # Generate SVG files for each layer
+                    svgs_heightmap = []
+                    for idx, (mask, threshold) in enumerate(layers_data):
+                        # Find and simplify contours
+                        contours_layer, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        simplified_contours = optimize_contours_for_laser(contours_layer, epsilon_factor=0.002, min_area=10.0)
+
+                        # Create SVG
+                        svg_bytes = svg_bytes_from_contours(
+                            simplified_contours, w, h,
+                            output_dpi, output_units, add_alignment_marks
+                        )
+
+                        layer_name = f"heightmap_layer_{idx+1:02d}_depth{threshold}.svg"
+                        svgs_heightmap.append((layer_name, svg_bytes))
+
+                    # Create ZIP
+                    zip_heightmap = create_zip_from_svg_list(svgs_heightmap)
+
+                    st.download_button(
+                        label=f"⬇️ Download All {heightmap_layers} Heightmap Layers (ZIP)",
+                        data=zip_heightmap,
+                        file_name=f"ai_heightmap_{heightmap_layers}layers.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+
+                    st.info("""
+                    **💡 Creating 3D Physical Relief:**
+
+                    1. Cut each layer from material (same thickness recommended)
+                    2. Stack layers from bottom (Layer 1) to top
+                    3. Glue/align precisely using alignment marks
+                    4. Result: Physical 3D sculpture based on AI depth!
+
+                    **Material suggestions:**
+                    - 2-3mm wood/acrylic for each layer
+                    - Use dowel pins for perfect alignment
+                    - Wood glue or acrylic cement
+                    """)
+
+                # Usage guide
+                st.markdown("---")
+                st.success("""
+                **🎨 Creative Uses for AI Depth Maps:**
+
+                **1. Variable-Depth Engraving:**
+                - Use depth map to control laser power
+                - Create realistic 3D relief effects on flat material
+                - Perfect for portraits with natural depth
+
+                **2. Multi-Pass 3D Engraving:**
+                - Import depth map as grayscale image
+                - Set up multiple passes with varying power
+                - Each pass engraves deeper based on depth
+
+                **3. Physical 3D Sculptures:**
+                - Use heightmap layers (see above)
+                - Stack to create actual 3D object
+                - Amazing for art installations
+
+                **4. Lithophanes:**
+                - Invert depth map
+                - Engrave on thin acrylic/wood
+                - Backlight for stunning depth effect
+                """)
+
+                if beginner_mode:
+                    st.balloons()
+                    st.info("""
+                    🎓 **Beginner's First AI Depth Map!**
+
+                    You just used cutting-edge AI to extract 3D information from a flat photo!
+
+                    **What just happened?**
+                    - AI analyzed your photo pixel by pixel
+                    - Recognized objects, faces, backgrounds, foreground
+                    - Estimated relative distance of each pixel
+                    - Created a grayscale "depth map"
+
+                    **Why is this amazing for laser engraving?**
+                    - Depth = how much to engrave!
+                    - Lighter areas in depth map = engrave deeper
+                    - Darker areas = engrave less or not at all
+                    - Result: 3D relief effect on flat material! 🎨
+                    """)
+
+            except Exception as e:
+                st.error(f"❌ Error generating depth map: {str(e)}")
+                st.info("""
+                **Troubleshooting:**
+                - Ensure dependencies are installed: `pip install torch transformers`
+                - First-time model download requires internet connection
+                - Large images may take longer to process
+                - If using CPU (no GPU), expect 20-30 second processing time
+                """)
+
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: gray; padding: 20px;'>
         <p><strong>🔷 Mandala Laser Engraving App - Enhanced Edition</strong></p>
-        <p>Features: 3 Dithering Algorithms • ⚡ Laser-Ready Engraving Mode • 🚀 One-Click Laser Prep • Anti-Jitter Vector Paths • 20-Layer Support • Auto Background Removal • Local Focus Algorithms • Measurement Tools • Beginner Guides</p>
+        <p>Features: 3 Dithering Algorithms • ⚡ Laser-Ready Engraving Mode • 🚀 One-Click Laser Prep • 🤖 AI Depth Maps • Anti-Jitter Vector Paths • 20-Layer Support • Auto Background Removal • Local Focus Algorithms • Measurement Tools • Beginner Guides</p>
         <p style='font-size: 0.85em;'>Optimized for LightBurn, Inkscape, and all professional laser cutters</p>
-        <p style='font-size: 0.8em; margin-top: 10px;'>✨ <strong>NEW:</strong> Laser Prep (One-Click) - Auto-resize, background removal, contrast optimization, and sharpening in seconds!</p>
-        <p style='font-size: 0.8em;'>✨ <strong>NEW:</strong> Engraving Mode with research-backed algorithms delivers razor-sharp boundaries and smooth vector paths instantly!</p>
+        <p style='font-size: 0.8em; margin-top: 10px;'>✨ <strong>NEW:</strong> AI Depth Map (3D Relief) - Intel's MiDaS AI extracts 3D depth from any 2D photo for stunning relief engravings!</p>
+        <p style='font-size: 0.8em;'>✨ Laser Prep (One-Click) - Auto-resize, background removal, contrast optimization, and sharpening!</p>
+        <p style='font-size: 0.8em;'>✨ Engraving Mode - Research-backed algorithms deliver razor-sharp boundaries and smooth vector paths!</p>
     </div>
     """, unsafe_allow_html=True)
 
